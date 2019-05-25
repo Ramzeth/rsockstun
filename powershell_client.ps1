@@ -1,7 +1,7 @@
 param (
     [string]$server = "localhost", 
-    [int]$port = 8888,    
-    [string]$pass = "hello"
+    [int]$port = 4888,    
+    [string]$pass = "microsoft"
 )
 
 $buffer = New-Object System.Byte[] 2048
@@ -169,6 +169,14 @@ $bufsize = 8192
     param($state)
     #"Debug : inside yamux thread. Hello ! " | out-file -Append c:\work\log.txt
     while($true){
+        if ($StopFlag[0] -ge 0){
+                #got yamux keepalive. we have to reply
+                $outbuf = [byte[]](0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00) + [bitconverter]::getbytes([int32]$StopFlag[0])[3..0]
+                $state.tcpstream.Write($outbuf,0,12)
+                $state.tcpstream.flush()
+                $StopFlag[0] = -1
+        }
+        
         #"Debug : inside yamux thread. Hello ! " | out-file -Append c:\work\log.txt
         foreach ($stream in $state.streams){
             #"Debug : inside yamux thread. working with stream: " | out-file -Append c:\work\log.txt
@@ -221,10 +229,11 @@ $bufsize = 8192
     }
 }
 
-#"Debug : begin" | out-file c:\work\log.txt
+"Debug : begin" | out-file c:\work\log.txt
 [System.Collections.ArrayList]$streams = @{}
 $StopFlag = [hashtable]::Synchronized(@{})#Shared array of flags. 0 - normal;1 - got FIN from yamux; 2 - got FIN from socks; 3 - got FIN from socks and FIN packet was sent to yamux
 $RcvBytes = [hashtable]::Synchronized(@{})#Shared array of num of received bytes. When its eq or more than 256144 - then we have to send ymx window update packet, otherwise files > 256k will not be transfered by yamux
+$StopFlag[0] = -1
 
 $tcpConnection = New-Object System.Net.Sockets.TcpClient($server, $port)
 #$tcpStream = $tcpConnection.GetStream() #uncomment for cleartext connection
@@ -235,6 +244,8 @@ $tcpStream.AuthenticateAsClient('127.0.0.1')
 if ($tcpConnection.Connected)
 {
  write-host "conneccted"
+    $connected = $true
+    
     $tcpstream.Write([byte[]][char[]]$pass,0,$pass.length)
 
     #create runspase for shared arrays StopFlag, RcvBytes
@@ -252,25 +263,25 @@ if ($tcpConnection.Connected)
     [System.IAsyncResult]$AsyncJobResult = $null
     $ymxAsyncJob = $PS1.BeginInvoke()
         
-    while($tcpConnection.Connected){
+    while($tcpConnection.Connected -and $connected){
         $ymxbuffer = $null
         $tnum = 0 
         #read 12 bytes of ymx header; we have to use cycle, because there may be multiple read attempts...
         do {
-            try { $num = $tcpStream.Read($tmpbuffer,0,12) } catch {}
+            try { $num = $tcpStream.Read($tmpbuffer,0,12) } catch {$connected=$false; break;}
+            if ($num -eq 0 ) {$connected=$false; break;}
             $tnum += $num
             $ymxbuffer += $tmpbuffer[0..($num-1)]
         }while ($tnum -lt 12 -and $tcpConnection.Connected)
         
-        #write-host $ymxbuffer
 	 if ($ymxbuffer[1] -eq 1 -and $ymxbuffer[3] -eq 1){
 	    write-host "Debug: got ymx SYN"
 	    $ymxstream = [bitconverter]::ToInt32($ymxbuffer[7..4],0)
 	    #write-host "Yamux stream ID: $ymxstream"
 
-	    #we do not need send reply for ymx SYN, but send it...
-	    $outbuf = [byte[]](0x00,0x01,0x00,0x02,$ymxstream[3],$ymxstream[2],$ymxstream[1],$ymxstream[0],0x00,0x00,0x00,0x00)
-	    $tcpstream.Write($outbuf,0,12)
+	    #we do not need send reply for ymx SYN, and we do not send it...
+	    #$outbuf = [byte[]](0x00,0x01,0x00,0x02,$ymxstream[3],$ymxstream[2],$ymxstream[1],$ymxstream[0],0x00,0x00,0x00,0x00)
+	    #$tcpstream.Write($outbuf,0,12)
 
 	    #create and start thread
 	    #write-host "Debug: creating thread"
@@ -304,11 +315,9 @@ if ($tcpConnection.Connected)
 
 	 }elseif ($ymxbuffer[1] -eq 2){
 	 	#write-host "got ymx keepalive"
-	 	$pingval = $ymxbuffer[8..11]
-	 	$outbuf = [byte[]](0x00,0x02,0x00,0x02,0x00,0x00,0x00,0x00,$pingval[0],$pingval[1],$pingval[2],$pingval[3])
-	 	$tcpstream.Write($outbuf,0,12)
-
-        
+	 	$pingval = [bitconverter]::ToInt32($ymxbuffer[11..8],0)
+        #set $StopFlag[0] to recieved ping value. This instruct yamuxScript to send this value back in ymx keepalive message
+        $StopFlag[0] = $pingval
 	 }elseif ($ymxbuffer[1] -eq 0) {
         #write-host "Debug: got ymx DATA"
 	    $ymxstream = [bitconverter]::ToInt32($ymxbuffer[7..4],0)
