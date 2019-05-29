@@ -74,14 +74,14 @@ func listenForClients(address string, certificate string) {
 		}else{
 			auth_header = ""
 		}
-		log.Printf("Found header: %s",auth_header)
+		//log.Printf("Found header: %s",auth_header)
 
 		//if string(statusb)[:len(agentpassword)] != agentpassword {
 		if (len(auth_header) >= len(agentpassword)) && (auth_header[:len(agentpassword)] == agentpassword) {
 			//pass is correct
 			//disable socket read timeouts
 			log.Println("Got remote Client")
-			httpresonse := "HTTP/1.1 200 Ok"+
+			httpresonse := "HTTP/1.1 200 OK"+
 				"\r\nContent-Type: text/html; charset=UTF-8"+
 				"\r\nServer: nginx/1.14.1"+
 				"\r\nContent-Length: 0"+
@@ -94,8 +94,10 @@ func listenForClients(address string, certificate string) {
 
 			//connect with yamux
 			//Add connection to yamux
+			//create default yamux config
 			yconf := yamux.DefaultConfig()
 			//yconf.EnableKeepAlive = false
+			//set yamux keepalives
 			yconf.KeepAliveInterval =  time.Millisecond * 50000
 			session, err = yamux.Client(conn, yconf)
 
