@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"crypto/tls"
+	"regexp"
 
 	"time"
 	"bufio"
@@ -54,7 +55,7 @@ func listenForClients(address string, certificate string) {
 
 		//read only 64 bytes with timeout=1-3 sec. So we haven't delay with browsers
 		conn.SetReadDeadline(time.Now().Add(proxytout))
-		statusb := make([]byte,64)
+		statusb := make([]byte,160)
 		_,_ = io.ReadFull(reader,statusb)
 
 		//Alternatively  - read all bytes with timeout=1-3 sec. So we have delay with browsers, but get all GET request
@@ -63,9 +64,46 @@ func listenForClients(address string, certificate string) {
 
 		//log.Printf("magic bytes: %v",statusb[:6])
 		//if hex.EncodeToString(statusb) != magicbytes {
-		if string(statusb)[:len(agentpassword)] != agentpassword {
+
+		r, _ := regexp.Compile("Xauth:.*")
+
+
+		auth_header := r.FindString(string(statusb))
+		if len(auth_header) > 7 {
+			auth_header = auth_header[7:]
+		}else{
+			auth_header = ""
+		}
+		//log.Printf("Found header: %s",auth_header)
+
+		//if string(statusb)[:len(agentpassword)] != agentpassword {
+		if (len(auth_header) >= len(agentpassword)) && (auth_header[:len(agentpassword)] == agentpassword) {
+			//pass is correct
+			//disable socket read timeouts
+			log.Println("Got remote Client")
+			httpresonse := "HTTP/1.1 200 OK"+
+				"\r\nContent-Type: text/html; charset=UTF-8"+
+				"\r\nServer: nginx/1.14.1"+
+				"\r\nContent-Length: 0"+
+				"\r\nConnection: keep-alive"+
+				"\r\n\r\n"
+
+			conn.Write([]byte(httpresonse))
+			conn.SetReadDeadline(time.Now().Add(100 * time.Hour))
+
+
+			//connect with yamux
+			//Add connection to yamux
+			//create default yamux config
+			yconf := yamux.DefaultConfig()
+			//yconf.EnableKeepAlive = false
+			//set yamux keepalives
+			yconf.KeepAliveInterval =  time.Millisecond * 50000
+			session, err = yamux.Client(conn, yconf)
+
+		}else {
 			//do HTTP checks
-			log.Printf("Received request: %v",string(statusb[:64]))
+			log.Printf("Received request: %v",string(statusb[:160]))
 			status := string(statusb)
 			if (strings.Contains(status," HTTP/1.1")){
 				httpresonse := "HTTP/1.1 301 Moved Permanently"+
@@ -81,21 +119,6 @@ func listenForClients(address string, certificate string) {
 			} else {
 				conn.Close()
 			}
-
-		}else {
-			//magic bytes received.
-			//disable socket read timeouts
-			log.Println("Got remote Client")
-			conn.SetReadDeadline(time.Now().Add(100 * time.Hour))
-
-
-				//connect with yamux
-				//Add connection to yamux
-				yconf := yamux.DefaultConfig()
-				//yconf.EnableKeepAlive = false
-				yconf.KeepAliveInterval =  time.Millisecond * 50000
-			session, err = yamux.Client(conn, yconf)
-
 		}
 	}
 }
