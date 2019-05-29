@@ -1,19 +1,19 @@
 package main
 
 import (
+	"crypto/tls"
 	"log"
 	"net"
-	"crypto/tls"
 
-	socks5 "github.com/armon/go-socks5"
-	"github.com/hashicorp/yamux"
-	"encoding/base64"
-	"time"
-	"net/http"
 	"bufio"
-	"strings"
+	"encoding/base64"
 	"github.com/ThomsonReutersEikon/go-ntlm/ntlm"
+	"github.com/armon/go-socks5"
+	"github.com/hashicorp/yamux"
 	"io/ioutil"
+	"net/http"
+	"strings"
+	"time"
 )
 
 
@@ -183,13 +183,55 @@ func connectForSocks(address string, proxy string) error {
 
 	log.Println("Starting client")
 	if proxy == "" {
-		conn.Write([]byte(agentpassword))
+
+
+		httpreq := "GET / HTTP/1.1"+
+			"\r\nHost: "+address+
+			"\r\nUser-Agent: "+useragent+
+			"\r\nXauth: "+agentpassword+
+			"\r\nAccept: */*"+
+			"\r\n\r\n"
+		conn.Write([]byte(httpreq))
+
 		//time.Sleep(time.Second * 1)
-		session, err = yamux.Server(conn, nil)
+
+		resp,_ := http.ReadResponse(bufio.NewReader(conn),&http.Request{Method: "GET"})
+		status := resp.Status
+
+		//log.Print(status)
+		//log.Print(resp)
+
+		//check if valid respone from RSocksTun server
+		if (resp.StatusCode == 200)  && (strings.Contains(status,"200 OK")){
+			yconf := yamux.DefaultConfig()
+			yconf.EnableKeepAlive = false
+			session, err = yamux.Server(conn, yconf)
+		}else {return err}
+
 	}else {
 
 		//log.Print(conntls)
-		newconn.Write([]byte(agentpassword))
+		proxhttpreq := "GET / HTTP/1.1"+
+			"\r\nHost: "+address+
+			"\r\nUser-Agent: "+useragent+
+			"\r\nXauth: "+agentpassword+
+			"\r\nAccept: */*"+
+			"\r\n\r\n"
+		newconn.Write([]byte(proxhttpreq))
+
+		resp,_ := http.ReadResponse(bufio.NewReader(conn),&http.Request{Method: "GET"})
+		status := resp.Status
+
+		//log.Print(status)
+		//log.Print(resp)
+
+		//check if valid respone from RSocksTun server
+		if (resp.StatusCode == 200)  && (strings.Contains(status,"200 OK")){
+			yconf := yamux.DefaultConfig()
+			yconf.EnableKeepAlive = false
+			session, err = yamux.Server(conn, yconf)
+		}else {return err}
+
 		time.Sleep(time.Second * 1)
 		session, err = yamux.Server(newconn, nil)
 	}
