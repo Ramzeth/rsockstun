@@ -1,8 +1,8 @@
 rsockstun
 ======
 
-Reverse socks5 tunneler with SSL and proxy support
-Based on https://github.com/brimstone/rsocks
+RedTeam reverse socks5 tunneler with SSL and proxy support
+
 
 Usage:
 ------
