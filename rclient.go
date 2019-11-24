@@ -1,6 +1,10 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/websocket"
 	"log"
 	"net"
 	"crypto/tls"
@@ -26,6 +30,161 @@ var connectproxystring string
 var useragent string
 var proxytimeout = time.Millisecond * 1000 //timeout for proxyserver response
 
+func makeDoTQuery(dnsName string) ([]byte, error) {
+	query := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			RecursionDesired: true,
+		},
+		Questions: []dnsmessage.Question{
+			{
+				Name:  dnsmessage.MustNewName(dnsName),
+				Type:  dnsmessage.TypeTXT,
+				Class: dnsmessage.ClassINET,
+			},
+		},
+	}
+	req, err := query.Pack()
+	if err != nil {
+		return nil, err
+	}
+	l := len(req)
+	req = append([]byte{
+		uint8(l >> 8),
+		uint8(l),
+	}, req...)
+	return req, nil
+}
+
+func parseTXTResponse(buf []byte, wantName string) (string, error) {
+	var p dnsmessage.Parser
+	hdr, err := p.Start(buf)
+	if err != nil {
+		return "", err
+	}
+	if hdr.RCode != dnsmessage.RCodeSuccess {
+		return "", fmt.Errorf("DNS query failed, rcode=%s", hdr.RCode)
+	}
+	if err := p.SkipAllQuestions(); err != nil {
+		return "", err
+	}
+	for {
+		h, err := p.AnswerHeader()
+		if err == dnsmessage.ErrSectionDone {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if h.Type != dnsmessage.TypeTXT || h.Class != dnsmessage.ClassINET {
+			continue
+		}
+		if !strings.EqualFold(h.Name.String(), wantName) {
+			if err := p.SkipAnswer(); err != nil {
+				return "", err
+			}
+		}
+		r, err := p.TXTResource()
+		if err != nil {
+			return "", err
+		}
+		return r.TXT[0], nil
+	}
+	return "", errors.New("No TXT record found")
+}
+
+func QueryESNIKeysForHost(hostname string) ([]byte, error) {
+	esniDnsName := "_esni." + hostname + "."
+	query, err := makeDoTQuery(esniDnsName)
+	if err != nil {
+		return nil, fmt.Errorf("Building DNS query failed: %s", err)
+	}
+	tlsconfig := &tls.Config{InsecureSkipVerify: true,}
+	c, err := tls.Dial("tcp", "1.1.1.1:853", tlsconfig)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	// Send DNS query
+	n, err := c.Write(query)
+	if err != nil || n != len(query) {
+		return nil, fmt.Errorf("Failed to write query: %s", err)
+	}
+
+	// Read DNS response
+	buf := make([]byte, 4096)
+	n, err = c.Read(buf)
+	if n < 2 && err != nil {
+		return nil, fmt.Errorf("Cannot read response: %s", err)
+	}
+	txt, err := parseTXTResponse(buf[2:n], esniDnsName)
+	if err != nil {
+		return nil, fmt.Errorf("Cannot process TXT record: %s", err)
+	}
+	return base64.StdEncoding.DecodeString(txt)
+}
+
+func connectForWsSocks(address string, proxy string, frontDomain string) error {
+	//create socks5 server
+	server, err := socks5.New(&socks5.Config{})
+	if err != nil {
+		return err
+	}
+
+	//replace in address ws: -> ws:// and wss: -> wss://
+	address = strings.Replace(address,"ws:","ws://",1)
+	address = strings.Replace(address,"wss:","wss://",1)
+	//create ws config
+	wsconf, _:= websocket.NewConfig(address, address)
+
+	//set server name for eSNI domain fronting
+	wsconf.TlsConfig = &tls.Config{InsecureSkipVerify: true, FakeServerName: frontDomain}
+
+	//esniKeysBytes, err := QueryESNIKeysForHost("www.cloudflare.com")
+	esniKeysBytes, err := QueryESNIKeysForHost(strings.Split((strings.Split(address,"://")[1]),":")[0])
+
+	wsconf.TlsConfig.ClientESNIKeys, err = tls.ParseESNIKeys(esniKeysBytes)
+
+	if wsconf.TlsConfig.ClientESNIKeys == nil {
+		log.Fatalf("Failed to process ESNI response for host: %s", err)
+	}
+
+	log.Println("Dialing Web Socket")
+	wsconn, err := websocket.DialConfig(wsconf)
+	if err != nil {
+		// handle error
+		log.Printf("Error when dialing webSocket, %v",err)
+		return err
+	}
+	defer wsconn.Close()
+
+	wsconn.PayloadType = websocket.BinaryFrame
+
+	log.Println("Starting client")
+	wsconn.Write([]byte(agentpassword))
+	time.Sleep(time.Second * 2)
+	session, err = yamux.Server(wsconn, nil)
+	if err != nil {
+		return err
+	}
+
+	for {
+		stream, err := session.Accept()
+		log.Println("Acceping stream")
+		if err != nil {
+			return err
+		}
+		log.Println("Passing off to socks5")
+		go func() {
+			err = server.ServeConn(stream)
+			if err != nil {
+				log.Println(err)
+			}
+		}()
+	}
+
+	return nil
+}
 
 
 func connectviaproxy(proxyaddr string, connectaddr string) net.Conn {
