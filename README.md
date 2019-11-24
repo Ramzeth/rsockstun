@@ -1,22 +1,33 @@
 rsockstun
 ======
 
-RedTeam reverse socks5 tunneler with SSL and proxy support
+Reverse socks5 tunneler with SSL and proxy support
+Additionaly it cat use websockets channel with eSNI domain fronting support
 
 
 Usage:
 ------
 ```
 
-Usage:
+Simple usage (direct mode):
 0) Generate self-signed certificate with openssl: openssl req -new -x509 -keyout server.key -out server.crt -days 365 -nodes
 1) Start server on VPS: ./rsockstun -listen :8443 -socks :1080 -cert server -pass Password1234
 2) Start on client: rsockstun -connect ServerIP:8443 -pass Password1234
 3) Use your favour socks client: proxychains curl -x socks5h://ServerIP:1080 https://gmail.com/
 4) Enjoy. :]
 
+eSNI domain fronting usage:
+0) Generate self-signed certificate with openssl: openssl req -new -x509 -keyout server.key -out server.crt -days 365 -nodes
+1) Create cloudflare account and set nameservers for your domain to it
+2) Set Full SSL mode on yoour cloudflare account
+3) Start server on VPS: ./rsockstun -listen wss:0.0.0.0 -socks :1080 -cert server -pass Password1234
+2) Start client on inside PC: rsockstun.exe -connect wss:yourdomain -pass Password1234 -frontDomain www.microsoft.com
+3) Use your favour socks client: proxychains curl -x socks5h://VPSServerIP:1080 https://gmail.com/
+4) Enjoy. :]
+
+
 Addidional params:
- -proxy 1.2.3.4:3128 - connect via proxy
+ -proxy 1.2.3.4:3128 - connect via proxy in direct mode
  -proxyauth Domain/username:password  - proxy creds
  -proxytimeout 2000 - server and clients will wait for 2000 msec for proxy connections... (Sometime it should be up to 4000...)
  -useragent "Internet Explorer 9.99" - User-Agent used in connection (sometimes it is usefull)
