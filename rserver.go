@@ -1,24 +1,91 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
+	"golang.org/x/net/websocket"
 	"io"
 	"log"
 	"net"
 	"os"
-	"crypto/tls"
 
-	"time"
 	"bufio"
+	"time"
 	//"encoding/hex"
 	"github.com/hashicorp/yamux"
+	"net/http"
 	"strings"
-
 )
 //var session *yamux.Session
 var stream *yamux.Stream
 var proxytout = time.Millisecond * 2000 //timeout for wait for password
 var rurl string//redirect URL
+
+func copyWorker(dst io.Writer, src io.Reader, doneCh chan<- bool) {
+	io.Copy(dst, src)
+	doneCh <- true
+}
+
+func wsHandler(ws *websocket.Conn) {
+	log.Printf("Got ws connection from  %v \n", ws.RemoteAddr())
+	var err error
+
+	ws.PayloadType = websocket.BinaryFrame
+	reader := bufio.NewReader(ws)
+
+	//read only 64 bytes with timeout=1-3 sec. So we haven't delay with browsers
+	ws.SetReadDeadline(time.Now().Add(proxytout))
+	statusb := make([]byte,64)
+	_,_ = io.ReadFull(reader,statusb)
+
+	if string(statusb)[:len(agentpassword)] != agentpassword {
+		//if passwordis not correct
+		log.Println("Password is incorrect.")
+		ws.Close()
+	}else {
+		//password is correct
+		//disable socket read timeouts
+		log.Printf("Auth remote ws client from %v. \n", ws.RemoteAddr())
+		err = ws.SetReadDeadline(time.Now().Add(100 * time.Hour))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error...")
+		}
+
+		//connect with yamux
+		//Add connection to yamux
+		yconf := yamux.DefaultConfig()
+		//yconf.EnableKeepAlive = false
+		yconf.KeepAliveInterval =  time.Millisecond * 50000
+		session, err = yamux.Client(ws, yconf)
+		for {
+			time.Sleep(time.Second * 1)
+			if session.IsClosed() {
+				//log.Println("Debug: End handler.")
+				return
+			}
+		}
+	}
+}
+
+func listenForWsClients(address string, certFile string){
+	address = strings.Replace(address,"ws:","",1)
+	address = strings.Replace(address,"wss:","",1)
+	//create and set http handler
+	http.Handle("/", websocket.Handler(wsHandler))
+	var err error
+	if certFile != ""  {
+		log.Println("Listening for https websocket far end...")
+		err = http.ListenAndServeTLS(address, certFile+".crt", certFile+".key", nil)
+	} else {
+		log.Println("Listening for http websocket far end...")
+		err = http.ListenAndServe(address, nil)
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+
+}
+
 
 // Catches yamux connecting to us
 func listenForClients(address string, certificate string) {
