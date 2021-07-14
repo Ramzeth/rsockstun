@@ -16,7 +16,7 @@ import (
 	"net/http"
 	"bufio"
 	"strings"
-	"github.com/ThomsonReutersEikon/go-ntlm/ntlm"
+	"github.com/staaldraad/go-ntlm/ntlm"
 	"io/ioutil"
 )
 
